@@ -1095,8 +1095,8 @@ void NotationInteraction::startDrag(const std::vector<EngravingItem*>& elems,
 
     startEdit(TranslatableString("undoableAction", "Drag element(s)", nullptr, int(m_dragData.elements.size())));
 
-    qreal scaling = m_notation->viewState()->matrix().m11();
-    qreal proximity = configuration()->selectionProximity() * 0.5f / scaling;
+    double scaling = m_notation->viewState()->matrix().m11();
+    double proximity = configuration()->selectionProximity() * 0.5 / scaling;
     m_scoreCallbacks.setSelectionProximity(proximity);
 
     if (isGripEditStarted()) {
@@ -2159,6 +2159,19 @@ bool NotationInteraction::selectInstrument(mu::engraving::InstrumentChange* inst
     async::Promise<InstrumentTemplate> templ = selectInstrumentScenario()->selectInstrument();
     templ.onResolve(this, [this, instrumentChange, &loop, &result](const InstrumentTemplate& val) {
         Instrument newInstrument = Instrument::fromTemplate(&val);
+
+        // If switching back to the part's original instrument, restore its player number
+        if (Part* part = instrumentChange->part()) {
+            const Instrument* baseInstrument = part->instrument();
+            if (baseInstrument && baseInstrument->id() == newInstrument.id()) {
+                InstrumentLabel& newLabel = newInstrument.instrumentLabel();
+                const InstrumentLabel& baseLabel = baseInstrument->instrumentLabel();
+                newLabel.setNumber(baseLabel.number());
+                newLabel.setShowNumberLong(baseLabel.showNumberLong());
+                newLabel.setShowNumberShort(baseLabel.showNumberShort());
+            }
+        }
+
         instrumentChange->setInit(true);
         instrumentChange->setupInstrument(&newInstrument);
 
@@ -2698,6 +2711,7 @@ void NotationInteraction::applyDropPaletteElement(mu::engraving::Score* score, m
     dropData->modifiers = keyboardModifier(modifiers);
     dropData->dropElement = e;
     dropData->track = (track == muse::nidx) ? target->track() : track;
+    dropData->pos = target->pageBoundingRect().topLeft();
 
     if (target->acceptDrop(*dropData)) {
         // use same code path as drag&drop
@@ -3094,7 +3108,11 @@ bool NotationInteraction::prepareDropStandardElement(const PointF& pos, Qt::Keyb
             edd.ed.track = trackZeroVoice(targetElem->track());
             setAnchorLines({ LineF(pos, measureRect.topLeft()) });
 
-            return targetMeasure->acceptDrop(edd.ed);
+            const bool dropAccepted = targetMeasure->acceptDrop(edd.ed);
+            if (dropAccepted) {
+                setDropRects(dropHighlightRects(dropElem, targetMeasure, measureRect, edd.ed.modifiers));
+            }
+            return dropAccepted;
         }
     }
 
@@ -3166,6 +3184,7 @@ bool NotationInteraction::prepareDropMeasureAnchorElement(const PointF& pos)
         const bool dropAccepted = targetMeasure->acceptDrop(edd.ed);
         if (dropAccepted) {
             setAnchorLines({ LineF(pos, measureRect.topLeft()) });
+            setDropRects(dropHighlightRects(dropElem, targetMeasure, measureRect, edd.ed.modifiers));
         }
 
         return dropAccepted;
@@ -3173,6 +3192,90 @@ bool NotationInteraction::prepareDropMeasureAnchorElement(const PointF& pos)
     dropElem->score()->addRefresh(dropElem->canvasBoundingRect());
     setDropTarget(nullptr);
     return false;
+}
+
+std::vector<RectF> NotationInteraction::dropHighlightRects(const EngravingItem* dropElem, const Measure* targetMeasure,
+                                                           const RectF& staffRect, KeyboardModifiers modifiers) const
+{
+    switch (dropElem->type()) {
+    case ElementType::VBOX:
+    case ElementType::TBOX:
+    case ElementType::FBOX:
+    case ElementType::HBOX:
+    case ElementType::MEASURE_NUMBER:
+    case ElementType::JUMP:
+    case ElementType::MARKER:
+    case ElementType::LAYOUT_BREAK:
+        return { targetMeasure->canvasBoundingRect() };
+
+    case ElementType::VOLTA:
+    case ElementType::GRADUAL_TEMPO_CHANGE:
+    case ElementType::KEYSIG:
+    case ElementType::TIMESIG:
+        if (modifiers & ControlModifier) {
+            return { staffRect };
+        }
+        return { targetMeasure->canvasBoundingRect() };
+
+    case ElementType::BRACKET:
+    case ElementType::MEASURE_REPEAT:
+    case ElementType::MEASURE:
+    case ElementType::SPACER:
+    case ElementType::IMAGE:
+    case ElementType::BAR_LINE:
+    case ElementType::SYMBOL:
+    case ElementType::CLEF:
+    case ElementType::STAFFTYPE_CHANGE:
+    case ElementType::STRING_TUNINGS:
+        return { staffRect };
+
+    case ElementType::ACTION_ICON:
+        switch (toActionIcon(dropElem)->actionType()) {
+        case ActionIconType::VFRAME:
+        case ActionIconType::HFRAME:
+        case ActionIconType::TFRAME:
+        case ActionIconType::FFRAME:
+        case ActionIconType::MEASURE:
+            return { targetMeasure->canvasBoundingRect() };
+
+        case ActionIconType::STAFF_TYPE_CHANGE:
+            return { staffRect };
+
+        case ActionIconType::SYSTEM_LOCK: {
+            const System* sys = targetMeasure->system();
+            const MeasureBase* first = sys ? sys->first() : nullptr;
+            const PointF topLeft = first ? first->canvasBoundingRect().topLeft() : PointF(0.0, 0.0);
+            return { RectF(topLeft, targetMeasure->canvasBoundingRect().bottomRight()) };
+        }
+
+        case ActionIconType::PAGE_LOCK: {
+            std::vector<RectF> dropRects;
+            for (System* sys : targetMeasure->page()->systems()) {
+                const bool lastSelectedSys = sys == targetMeasure->system();
+                const MeasureBase* first = sys ? sys->first() : nullptr;
+                const MeasureBase* last = sys ? sys->last() : nullptr;
+                if (lastSelectedSys) {
+                    last = targetMeasure;
+                }
+                if (!first || !last) {
+                    continue;
+                }
+                dropRects.push_back(RectF(first->canvasBoundingRect().topLeft(), last->canvasBoundingRect().bottomRight()));
+
+                if (lastSelectedSys) {
+                    break;
+                }
+            }
+            return dropRects;
+        }
+
+        default:
+            return {};
+        }
+
+    default:
+        return {};
+    }
 }
 
 //! NOTE Copied from ScoreView::dragTimeAnchorElement
@@ -6934,10 +7037,14 @@ void NotationInteraction::navigateToNextSyllable()
         }
     }
 
-    bool newLyrics = (toLyrics == 0);
-    if (!toLyrics || hasPrecedingRepeat) {
-        // Don't advance cursor if we are after a repeat, there is no partial dash present and we are inputting a dash
-        ChordRest* toLyricsChord = hasPrecedingRepeat && !prevPartialLyricsLine && lyrics->xmlText().empty() ? initialCR : cr;
+    const bool startIncomingPartialDash = hasPrecedingRepeat && !fromLyrics
+                                          && !prevPartialLyricsLine && lyrics->xmlText().empty();
+
+    const bool newLyrics = !toLyrics || startIncomingPartialDash;
+    if (newLyrics) {
+        /* Don't advance the cursor when starting an incoming partial dash after a repeat,
+         * i.e. when there is no adjacent preceding syllable to dash from: */
+        ChordRest* toLyricsChord = startIncomingPartialDash ? initialCR : cr;
 
         toLyrics = Factory::createLyrics(toLyricsChord);
         toLyrics->setTrack(track);
