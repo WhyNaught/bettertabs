@@ -24,6 +24,7 @@
 
 #include <QCoreApplication>
 
+#include "appshelltypes.h"
 #include "translation.h"
 #include "types/version.h"
 
@@ -37,8 +38,6 @@ using namespace muse::actions;
 
 static const muse::UriQuery FIRST_LAUNCH_SETUP_URI("musescore://firstLaunchSetup?floating=true");
 static const muse::UriQuery WELCOME_DIALOG_URI("musescore://welcomedialog");
-static const muse::Uri HOME_URI("musescore://home");
-static const muse::Uri NOTATION_URI("musescore://notation");
 
 static StartupModeType modeTypeTromString(const std::string& str)
 {
@@ -207,15 +206,6 @@ void StartupScenario::onStartupPageOpened(StartupModeType modeType)
 
     m_activeUpdateCheckCount = 0;
 
-    if (appUpdateScenario() && appUpdateScenario()->checkInProgress()) {
-        m_activeUpdateCheckCount++;
-        appUpdateScenario()->checkInProgressChanged().onNotify(this, [this, modeType]() {
-            appUpdateScenario()->checkInProgressChanged().disconnect(this);
-            m_activeUpdateCheckCount--;
-            showStartupDialogsIfNeed(modeType);
-        }, Asyncable::Mode::SetReplace);
-    }
-
     if (museSoundsUpdateScenario() && museSoundsUpdateScenario()->checkInProgress()) {
         m_activeUpdateCheckCount++;
         museSoundsUpdateScenario()->checkInProgressChanged().onNotify(this, [this, modeType]() {
@@ -268,18 +258,7 @@ void StartupScenario::showStartupDialogsIfNeed(StartupModeType modeType)
         }
     };
 
-    if (!appUpdateScenario() || !appUpdateScenario()->hasUpdate()) {
-        showWelcomeDialogAndSamplerUpdateIfNeed();
-        return;
-    }
-
-    auto promise = appUpdateScenario()->showUpdate();
-    promise.onResolve(this, [showWelcomeDialogAndSamplerUpdateIfNeed](const Ret& ret) {
-        if (ret.code() == static_cast<int>(Ret::Code::Ok)) {
-            return; // OK means the user wants to close and complete installation - don't show any more dialogs...
-        }
-        showWelcomeDialogAndSamplerUpdateIfNeed();
-    });
+    showWelcomeDialogAndSamplerUpdateIfNeed();
 }
 
 bool StartupScenario::shouldShowWelcomeDialog(StartupModeType modeType) const
